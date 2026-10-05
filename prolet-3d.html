@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Тележка «Пролёт» — 3D</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #10131a; color: #eee; font: 16px/1.45 sans-serif; }
+    body { display: flex; flex-direction: column; min-height: 100vh; }
+    #bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 14px; background: #1b2130; }
+    button { background: #2c3548; color: #fff; border: 1px solid #556; border-radius: 8px; padding: 8px 14px; cursor: pointer; font: inherit; }
+    button.on { background: #2e79b5; border-color: #2e79b5; }
+    #hint { color: #9aa6bb; font-size: 14px; }
+    #cause, #nums { margin: 0; padding: 6px 14px 0; max-width: 1100px; }
+    #nums { color: #d7deea; padding-bottom: 8px; }
+    #legend { display: flex; gap: 12px; flex-wrap: wrap; padding: 0 14px 8px; color: #ccc; font-size: 14px; }
+    .sw { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; }
+    #view { width: 100%; flex: 1; min-height: 560px; display: block; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <button id="play" class="on">Пауза</button>
+    <button id="onwire" class="on">На проводе</button>
+    <button id="parts">Детали по отдельности</button>
+    <strong id="title">Загрузка</strong>
+    <span id="hint">мышь — обзор, колёсико — ближе</span>
+  </div>
+  <p id="cause"></p>
+  <p id="nums"></p>
+  <div id="legend">
+    <span><i class="sw" style="background:#3a3f46"></i>печатные колёса</span>
+    <span><i class="sw" style="background:#242b36"></i>резина канавки</span>
+    <span><i class="sw" style="background:#6e2a2a"></i>тормоз</span>
+    <span><i class="sw" style="background:#4a5568"></i>нижний ролик</span>
+    <span><i class="sw" style="background:#c9842a"></i>моторы колёс</span>
+    <span><i class="sw" style="background:#1a1c22"></i>сервы и ESP32</span>
+    <span><i class="sw" style="background:#5e6a7c"></i>рама и жёлоб</span>
+    <span><i class="sw" style="background:#b7c0cc"></i>трубы в жёлобе</span>
+    <span><i class="sw" style="background:#c6a15a"></i>винт подачи</span>
+    <span><i class="sw" style="background:#c47a3a"></i>медная шина</span>
+    <span><i class="sw" style="background:#f0a040"></i>батарея</span>
+    <span><i class="sw" style="background:#1a3a6a"></i>драйверы</span>
+    <span><i class="sw" style="background:#c23b3b"></i>плюс 12 В</span>
+    <span><i class="sw" style="background:#d24a3a"></i>тепловизор 32×24</span>
+    <span><i class="sw" style="background:#111418"></i>камеры ESP32</span>
+    <span><i class="sw" style="background:#e6c84a"></i>ультразвук</span>
+    <span><i class="sw" style="background:#2f9e6b"></i>захваты</span>
+    <span><i class="sw" style="background:#8a6ad8"></i>зажим</span>
+    <span><i class="sw" style="background:#8ec5ef"></i>гирлянда</span>
+    <span><i class="sw" style="background:#ff7a1a"></i>оптоволокно</span>
+    <span><i class="sw" style="background:#e07030"></i>центр тяжести</span>
+  </div>
+  <canvas id="view"></canvas>
+  <script src="vendor/three.global.js"></script>
+  <script>
+    const THREE = globalThis.THREE;
+    const causeEl = document.getElementById("cause");
+    const numsEl = document.getElementById("nums");
+    const titleEl = document.getElementById("title");
+    if (!THREE) { causeEl.textContent = "Нет vendor/three.global.js рядом со страницей."; throw new Error("no three"); }
+    window.addEventListener("error", (e) => { causeEl.textContent = e.message; });
+
+    const G = 9.81;
+    const TOWER_X = 0;
+    const SPAN_L = 1.05;
+    const SAG = 0.5;
+    const BASE0 = -0.45;
+    const BASE1 = 1.32;
+    const START = -1.85;
+    const END = 1.55;
+    const WHEEL_X = 0.12;
+    const MOUTH = 0.36;
+    const STAGE_LEN = 0.66;
+    const OVERLAP = 0.10;
+    const STAGE_EXT = STAGE_LEN - OVERLAP;
+    const NSTAGES = 4;
+    const MAX_TIP = MOUTH + STAGE_EXT * NSTAGES;
+    const G_FRONT = 1.70;
+    const G_REAR = -1.20;
+    const RAIL_Y = 0.38;
+    const Z_FRONT = 0.22;
+    const Z_REAR = -0.22;
+    const WIRE_R = 0.012;
+    const GROOVE_R = 0.058;
+    const WHEEL_Y = GROOVE_R + WIRE_R;
+    const PIVOT_Y = 0.18;
+    const PIVOT_Z = 0.24;
+    const WHEEL_TUCK = -1.88;
+    const RAIL_NEAR = { y: RAIL_Y, z: Z_FRONT };
+    const RAIL_FAR = { y: RAIL_Y, z: Z_REAR };
+    const GRIP_STOW = -1.05;
+    function wireY(x) {
+      if (x <= TOWER_X) return 0;
+      if (x >= TOWER_X + SPAN_L) return 0;
+      const a = Math.PI * (x - TOWER_X) / SPAN_L;
+      return -SAG * Math.sin(a) * Math.sin(a);
+    }
+    function wireSlope(x) {
+      if (x <= TOWER_X || x >= TOWER_X + SPAN_L) return 0;
+      return -SAG * Math.PI / SPAN_L * Math.sin(2 * Math.PI * (x - TOWER_X) / SPAN_L);
+    }
+    function poseOnWire(base) {
+      let half = WHEEL_X;
+      for (let n = 0; n < 6; n += 1) {
+        const dist = Math.hypot(2 * half, wireY(base + half) - wireY(base - half));
+        if (dist < 1e-6) break;
+        half *= (2 * WHEEL_X) / dist;
+      }
+      const y1 = wireY(base - half);
+      const y2 = wireY(base + half);
+      return {
+        x: base,
+        y: (y1 + y2) / 2,
+        rot: Math.atan2(y2 - y1, 2 * half)
+      };
+    }
+    const GRIP_WINDOW = 0.025;
+    const MASS = {
+      bat: 0.16, sens: 0.08, frame: 0.70,
+      wheel: 0.05, fork: 0.27,
+      channel: 0.05, stage: 0.015, grip: 0.04
+    };
+    const TOTAL = MASS.bat + MASS.sens + MASS.frame + 2 * MASS.wheel + 2 * MASS.fork + 2 * MASS.channel + 2 * NSTAGES * MASS.stage + 2 * MASS.grip;
+
+    function lerp(a, b, t) { return a + (b - a) * t; }
+    function smooth(v) { const x = Math.min(1, Math.max(0, v)); return x * x * (3 - 2 * x); }
+    function seg(t, a, b) { return smooth((t - a) / (b - a)); }
+    function gripDeploy(z) { return Math.atan2(z, RAIL_Y); }
+    function gripLen(z) { return Math.hypot(RAIL_Y, z); }
+
+    function extensions(total) {
+      const out = [];
+      let left = Math.max(0, Math.min(NSTAGES * STAGE_EXT, total));
+      for (let i = 0; i < NSTAGES; i += 1) {
+        const part = Math.min(STAGE_EXT, left);
+        out.push(part);
+        left -= part;
+      }
+      return out;
+    }
+
+    function motion(t) {
+      const u = ((t % 40) + 40) % 40;
+      const drive = seg(u, 0, 6);
+      const extend = seg(u, 6, 13);
+      const seat = seg(u, 13, 16);
+      const tuck = seg(u, 16, 19);
+      const cross = seg(u, 19, 27);
+      const untuck = seg(u, 27, 30);
+      const unseat = seg(u, 30, 33);
+      const retract = seg(u, 33, 37);
+      const drive2 = seg(u, 37, 40);
+      const base = START + drive * (BASE0 - START) + cross * (BASE1 - BASE0) + drive2 * (END - BASE1);
+      const hold = Math.min(extend, 1 - retract);
+      const reach = (lock) => Math.max(0, Math.abs(lock - base) - MOUTH);
+      const down = Math.min(seat, 1 - unseat);
+      const wheelDown = 1 - Math.min(1, Math.max(0, tuck - untuck));
+      return { u, base, hold, down, wheelDown, frontExt: hold * reach(G_FRONT), rearExt: hold * reach(G_REAR) };
+    }
+
+    function wheelYZ(theta, side) {
+      const ay = WHEEL_Y - PIVOT_Y;
+      const az = -side * PIVOT_Z;
+      const y = ay * Math.cos(theta) - az * Math.sin(theta);
+      const z = ay * Math.sin(theta) + az * Math.cos(theta);
+      return { y: PIVOT_Y + y, z: side * PIVOT_Z + z };
+    }
+    function wireShift(t) {
+      const y = Math.max(-GRIP_WINDOW, Math.min(GRIP_WINDOW, -0.004 + 0.012 * Math.sin(t * 1.1)));
+      const z = Math.max(-GRIP_WINDOW, Math.min(GRIP_WINDOW, 0.015 * Math.sin(t * 0.7)));
+      return { y, z };
+    }
+    function gripPose(down, zRail, along) {
+      const len = gripLen(zRail);
+      const stowLen = Math.hypot(along, 0.04, 0.16);
+      const depLen = Math.hypot(0, RAIL_Y, zRail);
+      const sx = along / stowLen;
+      const sy = 0.04 / stowLen;
+      const sz = 0.16 / stowLen;
+      const dx = 0;
+      const dy = -RAIL_Y / depLen;
+      const dz = -zRail / depLen;
+      let x = sx + (dx - sx) * down;
+      let y = sy + (dy - sy) * down;
+      let z = sz + (dz - sz) * down;
+      const n = Math.hypot(x, y, z) || 1;
+      x /= n; y /= n; z /= n;
+      return { y: RAIL_Y + y * len, z: zRail + z * len, dir: { x, y, z }, len };
+    }
+    function stageCenters(totalExt) {
+      const exts = extensions(totalExt);
+      const centers = [];
+      let origin = MOUTH - STAGE_LEN;
+      exts.forEach((ext) => {
+        origin += ext;
+        centers.push(origin + STAGE_LEN / 2);
+        origin += 0;
+      });
+      return centers;
+    }
+
+    function layout(t) {
+      const p = motion(t);
+      const wheelTheta = lerp(0, WHEEL_TUCK, 1 - p.wheelDown);
+      const wFront = wheelYZ(wheelTheta, 1);
+      const wRear = wheelYZ(-wheelTheta, -1);
+      const frontTip = MOUTH + p.frontExt;
+      const rearTip = -(MOUTH + p.rearExt);
+      const gf = gripPose(p.down, Z_FRONT, -1);
+      const gr = gripPose(p.down, Z_REAR, 1);
+      const fCenters = stageCenters(p.frontExt);
+      const rCenters = stageCenters(p.rearExt);
+      const parts = [
+        { m: MASS.bat + MASS.sens, x: p.base, y: -0.62, z: -0.04 },
+        { m: MASS.frame - 0.04, x: p.base, y: -0.48, z: 0 },
+        { m: 0.04, x: p.base - 0.18, y: -0.68, z: 0.30 },
+        { m: MASS.wheel, x: p.base - WHEEL_X, y: wRear.y, z: wRear.z },
+        { m: MASS.wheel, x: p.base + WHEEL_X, y: wFront.y, z: wFront.z },
+        { m: MASS.fork, x: p.base - WHEEL_X, y: (PIVOT_Y + wRear.y) / 2, z: (-PIVOT_Z + wRear.z) / 2 },
+        { m: MASS.fork, x: p.base + WHEEL_X, y: (PIVOT_Y + wFront.y) / 2, z: (PIVOT_Z + wFront.z) / 2 },
+        { m: MASS.channel, x: p.base + (MOUTH - STAGE_LEN / 2), y: RAIL_Y, z: Z_FRONT },
+        { m: MASS.channel, x: p.base - (MOUTH - STAGE_LEN / 2), y: RAIL_Y, z: Z_REAR },
+        { m: MASS.grip, x: p.base + frontTip + gf.dir.x * gf.len / 2, y: (RAIL_Y + gf.y) / 2, z: (Z_FRONT + gf.z) / 2 },
+        { m: MASS.grip, x: p.base + rearTip + gr.dir.x * gr.len / 2, y: (RAIL_Y + gr.y) / 2, z: (Z_REAR + gr.z) / 2 }
+      ];
+      fCenters.forEach((cx) => parts.push({ m: MASS.stage, x: p.base + cx, y: RAIL_Y, z: Z_FRONT }));
+      rCenters.forEach((cx) => parts.push({ m: MASS.stage, x: p.base - cx, y: RAIL_Y, z: Z_REAR }));
+      let mx = 0;
+      let my = 0;
+      let mz = 0;
+      parts.forEach((part) => { mx += part.m * part.x; my += part.m * part.y; mz += part.m * part.z; });
+      const contacts = [];
+      if (p.wheelDown > 0.82) contacts.push(p.base - WHEEL_X, p.base + WHEEL_X);
+      if (p.down > 0.82) contacts.push(p.base + frontTip, p.base + rearTip);
+      return {
+        p, wheelTheta, frontTip, rearTip, wFront, wRear, gf, gr,
+        cm: { x: mx / TOTAL, y: my / TOTAL, z: mz / TOTAL },
+        contacts
+      };
+    }
+
+    const canvas = document.getElementById("view");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0xd7e0ea, 1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(36, 1, 0.04, 80);
+    scene.add(new THREE.HemisphereLight(0xfff8f0, 0x8ea0b8, 0.72));
+    const sun = new THREE.DirectionalLight(0xfff6ea, 1.85);
+    sun.position.set(5, 9, 6);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.near = 0.4;
+    sun.shadow.camera.far = 22;
+    sun.shadow.camera.left = -3.2;
+    sun.shadow.camera.right = 3.2;
+    sun.shadow.camera.top = 3.2;
+    sun.shadow.camera.bottom = -3.2;
+    sun.shadow.bias = -0.0006;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun, sun.target);
+    const fill = new THREE.DirectionalLight(0xc5d4e8, 0.55);
+    fill.position.set(-4, 3, -2);
+    scene.add(fill);
+    const rim = new THREE.DirectionalLight(0xffffff, 0.28);
+    rim.position.set(-1, 4, -7);
+    scene.add(rim);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    const paint = (hex, metal, rough) => new THREE.MeshStandardMaterial({
+      color: hex, metalness: metal, roughness: rough
+    });
+    const steel = paint(0xb7c0cc, 0.72, 0.32);
+    const steelDark = paint(0x5e6a7c, 0.55, 0.42);
+    const brass = paint(0xc6a15a, 0.7, 0.38);
+    const orange = paint(0xf0a040, 0.25, 0.48);
+    const green = paint(0x2f9e6b, 0.35, 0.42);
+    const blue = paint(0x3d8fd4, 0.45, 0.38);
+    const red = paint(0xd24a3a, 0.3, 0.45);
+    const yellow = paint(0xe6c84a, 0.4, 0.42);
+    const petg = paint(0x3a3f46, 0.15, 0.62);
+    const esp = paint(0x1a1c22, 0.35, 0.55);
+    const motorMat = paint(0xc9842a, 0.45, 0.4);
+    const rubber = paint(0x242b36, 0.15, 0.7);
+    const porcelain = paint(0x9fd0f2, 0.05, 0.28);
+    const porcelainDark = paint(0x7eb6dc, 0.05, 0.35);
+    const clampMat = paint(0x8a6ad8, 0.4, 0.4);
+    const towerMat = paint(0x6d6248, 0.45, 0.5);
+
+    function channel(length, outer, wall, mat, wallOnPositiveZ) {
+      const g = new THREE.Group();
+      const innerH = outer - wall;
+      const bottom = new THREE.Mesh(new THREE.BoxGeometry(length, wall, outer), mat);
+      bottom.position.set(length / 2, -outer / 2 + wall / 2, 0);
+      const top = new THREE.Mesh(new THREE.BoxGeometry(length, wall, outer), mat);
+      top.position.set(length / 2, outer / 2 - wall / 2, 0);
+      const side = new THREE.Mesh(new THREE.BoxGeometry(length, innerH, wall), mat);
+      const zSide = wallOnPositiveZ ? outer / 2 - wall / 2 : -outer / 2 + wall / 2;
+      side.position.set(length / 2, 0, zSide);
+      const lip = new THREE.Mesh(new THREE.BoxGeometry(0.012, outer + 0.004, outer + 0.004), steelDark);
+      lip.position.set(length - 0.006, 0, 0);
+      g.add(bottom, top, side, lip);
+      return g;
+    }
+
+    function sheave(grooveR, colorMat) {
+      const g = new THREE.Group();
+      const flangeR = grooveR + 0.012;
+      const half = Math.min(0.016, grooveR * 0.55);
+      const pts = [
+        new THREE.Vector2(grooveR * 0.34, -half),
+        new THREE.Vector2(flangeR, -half * 0.86),
+        new THREE.Vector2(flangeR, -half * 0.48),
+        new THREE.Vector2(grooveR + 0.0035, -half * 0.22),
+        new THREE.Vector2(grooveR, -0.0012),
+        new THREE.Vector2(grooveR, 0.0012),
+        new THREE.Vector2(grooveR + 0.0035, half * 0.22),
+        new THREE.Vector2(flangeR, half * 0.48),
+        new THREE.Vector2(flangeR, half * 0.86),
+        new THREE.Vector2(grooveR * 0.34, half)
+      ];
+      const shell = new THREE.Mesh(new THREE.LatheGeometry(pts, 36), colorMat);
+      shell.rotation.x = Math.PI / 2;
+      const capGeo = new THREE.CylinderGeometry(grooveR * 0.34, grooveR * 0.34, 0.004, 18);
+      capGeo.rotateX(Math.PI / 2);
+      const capA = new THREE.Mesh(capGeo, steel);
+      const capB = new THREE.Mesh(capGeo, steel);
+      capA.position.z = half * 0.72;
+      capB.position.z = -half * 0.72;
+      const bore = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, half * 2.2, 12), steelDark);
+      bore.rotation.x = Math.PI / 2;
+      g.add(shell, capA, capB, bore);
+      if (grooveR > 0.04) {
+        const liner = new THREE.Mesh(new THREE.TorusGeometry(grooveR, 0.0035, 8, 28), rubber);
+        g.add(liner);
+      }
+      const boltR = grooveR * 0.62;
+      for (let i = 0; i < 6; i += 1) {
+        const a = (i / 6) * Math.PI * 2;
+        const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.0032, 0.0032, 0.004, 6), steelDark);
+        bolt.rotation.x = Math.PI / 2;
+        bolt.position.set(Math.cos(a) * boltR, Math.sin(a) * boltR, half * 0.78);
+        g.add(bolt);
+      }
+      return g;
+    }
+
+    function strut(ax, ay, az, bx, by, bz, mat, thick) {
+      const dir = new THREE.Vector3(bx - ax, by - ay, bz - az);
+      const len = dir.length() || 0.001;
+      const t = thick || 0.012;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(t, len, t), mat);
+      mesh.position.set((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.multiplyScalar(1 / len));
+      return mesh;
+    }
+
+    function makeFork(side) {
+      const s = side || 1;
+      const pivot = new THREE.Group();
+      const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.09, 16), steel);
+      pin.rotation.z = Math.PI / 2;
+      const motor = new THREE.Group();
+      motor.position.x = 0.048;
+      const servoBody = new THREE.Mesh(new THREE.BoxGeometry(0.040, 0.020, 0.038), esp);
+      const horn = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.004, 16), steel);
+      horn.rotation.z = Math.PI / 2;
+      horn.position.x = 0.012;
+      const earS = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.006, 0.046), petg);
+      motor.add(servoBody, horn, earS);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.028, 0.028), motorMat);
+      box.position.set(0.028, 0, 0);
+      const wy = WHEEL_Y - PIVOT_Y;
+      const wz = -s * PIVOT_Z;
+      const armEndZ = wz + s * 0.034;
+      const armLen = Math.hypot(wy, armEndZ);
+      const armDir = new THREE.Vector3(0, wy, armEndZ).normalize();
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.014, armLen, 0.014), steelDark);
+      arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), armDir);
+      arm.position.copy(armDir).multiplyScalar(armLen / 2);
+      const axleLen = Math.abs(wz - armEndZ);
+      const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, axleLen, 12), steel);
+      axle.rotation.x = Math.PI / 2;
+      axle.position.set(0, wy, (armEndZ + wz) / 2);
+      const wheel = sheave(GROOVE_R, petg);
+      wheel.position.set(0, wy, wz);
+      wheel.name = "wheel";
+      const keeper = sheave(0.016, paint(0x4a5568, 0.4, 0.45));
+      keeper.name = "keeper";
+      const ky = -0.024 - PIVOT_Y;
+      const kz = -s * (PIVOT_Z - 0.016);
+      keeper.position.set(0, ky, kz);
+      const hang = new THREE.Mesh(new THREE.BoxGeometry(0.008, Math.abs(wy - ky), 0.008), steelDark);
+      hang.position.set(0.08, (wy + ky) / 2, kz);
+      const link = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.008, 0.008), steelDark);
+      link.position.set(0.04, ky, kz);
+      const keeperSpring = new THREE.Group();
+      for (let i = 0; i < 5; i += 1) {
+        const turn = new THREE.Mesh(new THREE.TorusGeometry(0.006, 0.0011, 6, 12), steel);
+        turn.rotation.x = Math.PI / 2;
+        turn.position.set(0.08, ky + 0.012 + i * 0.004, kz);
+        keeperSpring.add(turn);
+      }
+      const driveHub = new THREE.Group();
+      driveHub.position.set(0, wy, armEndZ - 0.01);
+      driveHub.rotation.x = Math.PI / 2;
+      const drive = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.020, 0.026, 20), motorMat);
+      drive.name = "driveMotor";
+      const driveCap = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.005, 6), steelDark);
+      driveCap.position.y = 0.012;
+      const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.003, 24), steel);
+      disc.position.y = -0.012;
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.004, 0.012), paint(0x6e2a2a, 0.3, 0.55));
+      pad.position.set(0.022, -0.012, 0);
+      drive.add(driveCap, disc, pad);
+      const encoder = new THREE.Mesh(new THREE.TorusGeometry(0.014, 0.002, 6, 18), paint(0x111111, 0.3, 0.55));
+      encoder.rotation.x = Math.PI / 2;
+      encoder.position.y = 0.016;
+      drive.add(encoder);
+      const caliper = new THREE.Mesh(new THREE.BoxGeometry(0.010, 0.008, 0.016), paint(0x6e2a2a, 0.35, 0.5));
+      caliper.position.set(0.030, -0.012, 0);
+      driveHub.add(drive, caliper);
+      pivot.add(pin, motor, box, arm, axle, driveHub, wheel, hang, link, keeperSpring, keeper);
+      return pivot;
+    }
+
+    function makeTelescope(zRail, wallOnPositiveZ) {
+      const root = new THREE.Group();
+      const sizes = [0.042, 0.034, 0.028, 0.022, 0.017];
+      let parent = root;
+      const stages = [];
+      for (let i = 0; i < NSTAGES + 1; i += 1) {
+        const piece = channel(STAGE_LEN, sizes[i], 0.003, i === 0 ? steelDark : petg, wallOnPositiveZ);
+        if (i === 0) root.add(piece);
+        else {
+          parent.add(piece);
+          stages.push(piece);
+        }
+        parent = piece;
+      }
+      const screwHang = new THREE.Group();
+      screwHang.rotation.z = Math.PI / 2;
+      screwHang.position.x = STAGE_LEN / 2;
+      const screw = new THREE.Mesh(new THREE.CylinderGeometry(0.0035, 0.0035, STAGE_LEN * 0.92, 12), brass);
+      screwHang.add(screw);
+      root.add(screwHang);
+      const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.028, 14), motorMat);
+      motor.rotation.z = Math.PI / 2;
+      motor.position.set(-0.02, 0, 0);
+      const nut = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.016, 0.016), motorMat);
+      nut.position.set(0.03, 0, 0);
+      stages[0].add(nut);
+      root.add(motor);
+      const grip = new THREE.Group();
+      const len = gripLen(zRail);
+      grip.position.x = STAGE_LEN;
+      parent.add(grip);
+      const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.05, 12), steel);
+      pin.rotation.z = Math.PI / 2;
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.012, len, 0.012), green);
+      arm.name = "gripArm";
+      arm.position.y = -len / 2;
+      const foot = sheave(0.02, green);
+      foot.name = "gripFoot";
+      foot.position.y = -len + 0.02;
+      foot.userData.base = foot.position.clone();
+      const jawL = new THREE.Mesh(new THREE.BoxGeometry(0.004, 0.028, 0.016), green);
+      const jawR = jawL.clone();
+      jawL.position.set(0, 0.01, 0.012);
+      jawR.position.set(0, 0.01, -0.012);
+      jawL.rotation.x = 0.5;
+      jawR.rotation.x = -0.5;
+      foot.add(jawL, jawR);
+      const coil = new THREE.Group();
+      for (let i = 0; i < 6; i += 1) {
+        const turn = new THREE.Mesh(new THREE.TorusGeometry(0.009, 0.0013, 6, 14), steel);
+        turn.rotation.x = Math.PI / 2;
+        turn.position.y = -len + 0.055 + i * 0.005;
+        coil.add(turn);
+      }
+      grip.add(pin, arm, foot, coil);
+      const servo = new THREE.Mesh(new THREE.BoxGeometry(0.040, 0.020, 0.020), esp);
+      servo.position.set(0, -0.012, 0.016);
+      grip.add(servo);
+      return { root, stages, screw, grip, foot };
+    }
+
+    const world = new THREE.Group();
+    const catalog = new THREE.Group();
+    catalog.visible = false;
+    scene.add(world, catalog);
+
+    const strandCanvas = document.createElement("canvas");
+    strandCanvas.width = 64;
+    strandCanvas.height = 256;
+    const strandCtx = strandCanvas.getContext("2d");
+    strandCtx.fillStyle = "#e7eef5";
+    strandCtx.fillRect(0, 0, 64, 256);
+    strandCtx.strokeStyle = "#9aa8b8";
+    strandCtx.lineWidth = 2;
+    for (let s = -4; s < 12; s += 1) {
+      strandCtx.beginPath();
+      strandCtx.moveTo(s * 10, 0);
+      strandCtx.lineTo(s * 10 + 28, 256);
+      strandCtx.stroke();
+    }
+    const strandMap = new THREE.CanvasTexture(strandCanvas);
+    strandMap.wrapS = THREE.RepeatWrapping;
+    strandMap.wrapT = THREE.RepeatWrapping;
+    strandMap.repeat.set(18, 1);
+    strandMap.colorSpace = THREE.SRGBColorSpace;
+    const wireMat = new THREE.MeshStandardMaterial({
+      color: 0xf4f7fb, metalness: 0.88, roughness: 0.28, map: strandMap, bumpMap: strandMap, bumpScale: 0.0015
+    });
+    const sagPts = [];
+    for (let i = 0; i <= 48; i += 1) {
+      const x = -3.2 + (5.6 * i) / 48;
+      sagPts.push(new THREE.Vector3(x, wireY(x), 0));
+    }
+    const wire = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(sagPts), 80, WIRE_R, 10, false), wireMat);
+    world.add(wire);
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(14, 48), paint(0xc9d1da, 0.02, 0.94));
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -1.32;
+    const grid = new THREE.GridHelper(16, 32, 0x8e99a6, 0xb4bec8);
+    grid.position.y = -1.315;
+    world.add(ground, grid);
+
+    const tower = new THREE.Group();
+    const postA = new THREE.Mesh(new THREE.BoxGeometry(0.045, 2.3, 0.045), towerMat);
+    postA.position.set(0, -0.15, -0.78);
+    const postB = new THREE.Mesh(new THREE.BoxGeometry(0.04, 2.3, 0.04), towerMat);
+    postB.position.set(0, -0.15, -1.02);
+    const brace1 = strut(0, 0.7, -0.78, 0, -0.2, -1.02, towerMat);
+    const brace2 = strut(0, -0.2, -0.78, 0, 0.7, -1.02, towerMat);
+    const armBeam = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 1.15), towerMat);
+    armBeam.position.set(0, 0.78, -0.28);
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.74, 16), steelDark);
+    stem.position.set(0, 0.42, 0);
+    const clevis = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.05), steelDark);
+    clevis.position.set(0, 0.09, 0);
+    tower.add(postA, postB, brace1, brace2, armBeam, stem, clevis);
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.036, 0.04), clampMat);
+    jaw.position.y = 0.046;
+    const saddle = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.008, 0.04), clampMat);
+    saddle.position.y = 0.017;
+    const cheekGeo = new THREE.BoxGeometry(0.16, 0.018, 0.006);
+    const cheekL = new THREE.Mesh(cheekGeo, clampMat);
+    const cheekR = new THREE.Mesh(cheekGeo, clampMat);
+    cheekL.position.set(0, 0.014, 0.020);
+    cheekR.position.set(0, 0.014, -0.020);
+    tower.add(jaw, saddle, cheekL, cheekR);
+    for (const sx of [-0.045, 0.045]) {
+      for (const sz of [-0.020, 0.020]) {
+        const ubolt = new THREE.Mesh(new THREE.CylinderGeometry(0.0032, 0.0032, 0.036, 8), steel);
+        ubolt.position.set(sx, 0.030, sz);
+        const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.004, 6), steelDark);
+        nut.position.set(sx, 0.046, sz);
+        tower.add(ubolt, nut);
+      }
+    }
+    for (let n = 0; n < 8; n += 1) {
+      const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.105, 0.028, 28), n % 2 ? porcelain : porcelainDark);
+      disc.position.y = 0.32 + n * 0.055;
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.03, 10), steelDark);
+      cap.position.y = 0.305 + n * 0.055;
+      tower.add(disc, cap);
+    }
+    tower.position.x = 0;
+    const towerB = tower.clone();
+    towerB.position.x = SPAN_L;
+    world.add(tower, towerB);
+
+    const robot = new THREE.Group();
+    world.add(robot);
+    const frame = new THREE.Group();
+    function railBeam(z) {
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(0.50, 0.02, 0.02), steelDark);
+      beam.position.set(0, -0.17, z);
+      const slot = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.004, 0.005), paint(0x2e3542, 0.5, 0.6));
+      slot.position.set(0, -0.17, z + Math.sign(z) * 0.006);
+      const topSlot = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.003, 0.005), paint(0x2e3542, 0.5, 0.6));
+      topSlot.position.set(0, -0.161, z);
+      frame.add(beam, slot, topSlot);
+    }
+    railBeam(-0.16);
+    railBeam(0.16);
+    const belly = new THREE.Group();
+    belly.position.y = -0.20;
+    belly.add(frame);
+    const battery = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.1, 0.12), orange);
+    battery.position.set(0, -0.42, -0.04);
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.008, 0.08), paint(0xd9842c, 0.3, 0.5));
+    lid.position.set(0, -0.366, -0.04);
+    belly.add(battery, lid);
+    const cellMat = paint(0xd5dbe3, 0.75, 0.28);
+    for (let i = 0; i < 3; i += 1) {
+      const cell = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.004, 18), cellMat);
+      cell.rotation.z = Math.PI / 2;
+      cell.position.set(-0.172, -0.45 + i * 0.022, -0.04);
+      belly.add(cell);
+    }
+    const xt = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.008, 0.014), paint(0xf4f4f4, 0.15, 0.45));
+    xt.position.set(0.176, -0.40, -0.04);
+    const xtPin = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.003, 0.006), paint(0xf0c14a, 0.85, 0.3));
+    xtPin.position.set(0.184, -0.40, -0.04);
+    const fuse = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.022, 12), paint(0xf4f4f4, 0.25, 0.4));
+    fuse.rotation.z = Math.PI / 2;
+    fuse.position.set(0.15, -0.40, -0.12);
+    const driver = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.038, 0.004), paint(0x1a3a6a, 0.25, 0.5));
+    driver.position.set(0.02, -0.42, -0.112);
+    const buck = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.016, 0.008), paint(0x22262e, 0.45, 0.4));
+    buck.position.set(0.105, -0.435, -0.114);
+    const imu = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.005, 0.012), paint(0x141414, 0.4, 0.45));
+    imu.position.set(0, -0.157, 0.16);
+    const stud = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.008, 10), paint(0xc47a3a, 0.9, 0.25));
+    stud.rotation.x = Math.PI / 2;
+    stud.position.set(-0.14, -0.42, -0.112);
+    belly.add(fuse, driver, buck, imu, stud);
+    const glass = new THREE.MeshPhysicalMaterial({ color: 0xc5d8ee, metalness: 0.05, roughness: 0.04, transmission: 0.72, thickness: 0.006 });
+    const germanium = new THREE.MeshStandardMaterial({ color: 0x2c333c, metalness: 0.72, roughness: 0.18 });
+    const nose = new THREE.Group();
+    function camPost(z) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.16, 0.012), steelDark);
+      post.position.set(0.14, -0.09, z);
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.008, 0.028), steel);
+      pad.position.set(0.14, -0.168, z);
+      const parts = [post, pad];
+      for (const sx of [-0.01, 0.01]) {
+        const screw = new THREE.Mesh(new THREE.CylinderGeometry(0.0034, 0.0034, 0.004, 6), steelDark);
+        screw.position.set(0.14 + sx, -0.164, z);
+        parts.push(screw);
+      }
+      return parts;
+    }
+    nose.add(...camPost(-0.16), ...camPost(0.16));
+    function cameraHead(z) {
+      const rig = new THREE.Group();
+      rig.position.set(0.14, -0.002, z);
+      const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.012, 0.016), petg);
+      const head = new THREE.Group();
+      const pcb = new THREE.Mesh(new THREE.BoxGeometry(0.027, 0.041, 0.004), esp);
+      pcb.position.y = 0.028;
+      const module = new THREE.Mesh(new THREE.BoxGeometry(0.009, 0.009, 0.006), paint(0x111418, 0.3, 0.45));
+      module.position.set(0, 0.044, 0.002);
+      const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.0032, 0.0036, 0.004, 14), glass);
+      lens.position.set(0, 0.048, 0.002);
+      const chip = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.012, 0.002), steel);
+      chip.position.set(0, 0.016, 0.002);
+      head.add(pcb, module, lens, chip);
+      const aim = new THREE.Vector3(0.22, 0.20, -z * 0.35);
+      aim.normalize();
+      head.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), aim);
+      rig.add(bracket, head);
+      return rig;
+    }
+    nose.add(cameraHead(-0.16), cameraHead(0.16));
+    const thermalPost = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.16, 0.012), steelDark);
+    thermalPost.position.set(0.02, -0.09, -0.16);
+    const thermalPad = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.008, 0.028), steel);
+    thermalPad.position.set(0.02, -0.168, -0.16);
+    const thermal = new THREE.Group();
+    thermal.position.set(0.02, -0.002, -0.16);
+    const thermalBody = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.014, 0.004), esp);
+    thermalBody.position.y = 0.004;
+    const thermalWindow = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.006, 0.002), germanium);
+    thermalWindow.position.y = 0.012;
+    thermal.add(thermalBody, thermalWindow);
+    const thermalAim = new THREE.Vector3(0.16, 0.22, 0.10);
+    thermalAim.normalize();
+    thermal.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), thermalAim);
+    nose.add(thermalPost, thermalPad, thermal);
+    const board = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.028, 0.004), esp);
+    board.position.set(0, -0.42, -0.112);
+    const shield = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.014, 0.003), steel);
+    shield.position.set(-0.008, -0.42, -0.116);
+    const usb = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.006, 0.006), steel);
+    usb.position.set(0.028, -0.42, -0.114);
+    for (const sx of [-0.018, 0.018]) {
+      for (const sy of [-0.428, -0.412]) {
+        const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, 0.006, 8), steelDark);
+        stand.rotation.x = Math.PI / 2;
+        stand.position.set(sx, sy, -0.108);
+        belly.add(stand);
+      }
+    }
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.006, 0.016), petg);
+    hood.position.set(0, -0.40, -0.118);
+    belly.add(nose, board, shield, usb, hood);
+    robot.add(belly);
+    for (const x of [-0.18, 0.18]) {
+      const yoke = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.018, 0.36), steelDark);
+      yoke.position.set(x, -0.56, 0);
+      belly.add(yoke);
+      for (const z of [-0.16, 0.16]) {
+        belly.add(strut(x, -0.18, z, x, -0.55, z, steelDark, 0.01));
+        const nut = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, 0.004, 6), steel);
+        nut.position.set(x, -0.175, z);
+        belly.add(nut);
+      }
+      belly.add(strut(x, -0.55, -0.04, x, -0.47, -0.04, steelDark, 0.008));
+    }
+    const fiberMat = paint(0xff7a1a, 0.2, 0.45);
+    const spoolFoot = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.01, 0.04), steel);
+    spoolFoot.position.set(-0.18, -0.355, 0.16);
+    const spoolBoltA = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.008, 6), steelDark);
+    spoolBoltA.position.set(-0.192, -0.348, 0.16);
+    const spoolBoltB = spoolBoltA.clone();
+    spoolBoltB.position.x = -0.168;
+    const spool = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.018, 20), fiberMat);
+    spool.rotation.x = Math.PI / 2;
+    spool.position.set(-0.18, -0.68, 0.30);
+    const spoolHub = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.024, 12), esp);
+    spoolHub.rotation.x = Math.PI / 2;
+    spoolHub.position.copy(spool.position);
+    const converter = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.016, 0.018), esp);
+    converter.position.set(-0.18, -0.55, 0.24);
+    robot.add(spoolFoot, spoolBoltA, spoolBoltB, spool, spoolHub, converter);
+    robot.add(strut(-0.18, -0.36, 0.16, -0.18, -0.68, 0.30, petg, 0.012));
+    robot.add(strut(-0.18, -0.55, 0.24, -0.18, -0.68, 0.29, fiberMat, 0.006));
+    const senseMat = paint(0xc47a3a, 0.85, 0.3);
+    for (const sx of [-0.22, 0.22]) {
+      const finger = new THREE.Mesh(new THREE.SphereGeometry(0.007, 14, 10), senseMat);
+      finger.name = "senseTip";
+      finger.position.set(sx, -0.006, 0.020);
+      const stemS = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.28, 0.006), petg);
+      stemS.position.set(sx, -0.21, 0.16);
+      const neck = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.006, 0.13), petg);
+      neck.position.set(sx, -0.006, 0.085);
+      const footS = new THREE.Mesh(new THREE.BoxGeometry(0.024, 0.01, 0.028), petg);
+      footS.position.set(sx, -0.355, 0.16);
+      robot.add(finger, stemS, neck, footS);
+    }
+    const fiberPts = [];
+    for (let i = 0; i < 24; i += 1) fiberPts.push(new THREE.Vector3());
+    const fiberGeom = new THREE.BufferGeometry().setFromPoints(fiberPts);
+    const fiberLine = new THREE.Line(fiberGeom, new THREE.LineBasicMaterial({ color: 0xff7a1a }));
+    world.add(fiberLine);
+
+    function mountedBar(x, y0, z0, y1, z1, mat, thick) {
+      const g = new THREE.Group();
+      const foot = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.012, 0.046), steel);
+      foot.position.set(x, -0.352, z0);
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.014, 0.04), steel);
+      cap.position.set(x, y1, z1);
+      g.add(foot, cap, strut(x, y0, z0, x, y1, z1, mat, thick));
+      return g;
+    }
+    robot.add(mountedBar(0, -0.36, 0.16, RAIL_Y - 0.016, Z_FRONT, steel, 0.016));
+    robot.add(mountedBar(-0.12, -0.36, 0.16, RAIL_Y - 0.016, Z_FRONT, steel, 0.016));
+    robot.add(mountedBar(0, -0.36, -0.16, RAIL_Y - 0.016, Z_REAR, steel, 0.016));
+    robot.add(mountedBar(0.12, -0.36, -0.16, RAIL_Y - 0.016, Z_REAR, steel, 0.016));
+    robot.add(mountedBar(-WHEEL_X - 0.12, -0.36, -0.16, PIVOT_Y, -PIVOT_Z, steelDark, 0.016));
+    robot.add(mountedBar(-WHEEL_X + 0.12, -0.36, -0.16, PIVOT_Y, -PIVOT_Z, steelDark, 0.016));
+    robot.add(mountedBar(WHEEL_X - 0.12, -0.36, 0.16, PIVOT_Y, PIVOT_Z, steelDark, 0.016));
+    robot.add(mountedBar(WHEEL_X + 0.12, -0.36, 0.16, PIVOT_Y, PIVOT_Z, steelDark, 0.016));
+    const hingeR = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.028, 0.028), steelDark);
+    const hingeF = hingeR.clone();
+    hingeR.position.set(-WHEEL_X, PIVOT_Y, -PIVOT_Z);
+    hingeF.position.set(WHEEL_X, PIVOT_Y, PIVOT_Z);
+    robot.add(hingeR, hingeF);
+    const loom = paint(0x1a1e26, 0.15, 0.75);
+    const copper = paint(0xc47a3a, 0.9, 0.25);
+    robot.add(strut(WHEEL_X + 0.12, -0.35, 0.16, WHEEL_X + 0.12, PIVOT_Y, PIVOT_Z, copper, 0.008));
+    robot.add(strut(-WHEEL_X - 0.12, -0.35, -0.16, -WHEEL_X - 0.12, PIVOT_Y, -PIVOT_Z, copper, 0.008));
+    robot.add(strut(-WHEEL_X - 0.12, -0.36, -0.16, -WHEEL_X, PIVOT_Y, -PIVOT_Z, loom, 0.006));
+    robot.add(strut(WHEEL_X + 0.12, -0.36, 0.16, WHEEL_X, PIVOT_Y, PIVOT_Z, loom, 0.006));
+    robot.add(strut(-WHEEL_X - 0.12, -0.36, -0.16, -WHEEL_X - 0.12, -0.76, -0.16, loom, 0.006));
+    robot.add(strut(WHEEL_X + 0.12, -0.36, 0.16, WHEEL_X + 0.12, -0.76, 0.16, loom, 0.006));
+    robot.add(strut(-0.24, -0.76, -0.16, 0.08, -0.76, -0.08, loom, 0.006));
+    robot.add(strut(0.24, -0.76, 0.16, 0.0, -0.76, -0.06, loom, 0.006));
+    const power = paint(0xc23b3b, 0.35, 0.45);
+    const returnLead = paint(0x141414, 0.25, 0.55);
+    belly.add(strut(0.17, -0.40, -0.04, 0.15, -0.40, -0.12, power, 0.004));
+    belly.add(strut(0.12, -0.41, -0.11, 0.04, -0.42, -0.112, power, 0.004));
+    belly.add(strut(0.17, -0.40, -0.04, -0.12, -0.42, -0.11, returnLead, 0.004));
+    belly.add(strut(0.0, -0.42, -0.11, 0.14, -0.16, -0.16, loom, 0.0035));
+    belly.add(strut(0.0, -0.56, -0.10, 0.14, -0.56, 0.16, loom, 0.0035));
+    belly.add(strut(0.14, -0.56, 0.16, 0.14, -0.12, 0.16, loom, 0.0035));
+    belly.add(strut(-0.14, -0.42, -0.11, -0.14, -0.18, -0.16, copper, 0.006));
+
+    const forkR = makeFork(-1);
+    const forkF = makeFork(1);
+    forkR.position.set(-WHEEL_X, PIVOT_Y, -PIVOT_Z);
+    forkF.position.set(WHEEL_X, PIVOT_Y, PIVOT_Z);
+    const probePivot = new THREE.Group();
+    probePivot.position.set(0.12, PIVOT_Y, PIVOT_Z);
+    const probeY = 0.02 + WIRE_R - PIVOT_Y;
+    const probeZ = -PIVOT_Z;
+    const probeEndZ = probeZ + 0.028;
+    const probeLen = Math.hypot(probeY, probeEndZ);
+    const probeDir = new THREE.Vector3(0, probeY, probeEndZ).normalize();
+    const probeArm = new THREE.Mesh(new THREE.BoxGeometry(0.01, probeLen, 0.01), steelDark);
+    probeArm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), probeDir);
+    probeArm.position.copy(probeDir).multiplyScalar(probeLen / 2);
+    const probeWheel = sheave(0.02, yellow);
+    probeWheel.name = "probe";
+    probeWheel.position.set(0, probeY, probeZ);
+    const probePin = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.04, 12), motorMat);
+    probePin.rotation.z = Math.PI / 2;
+    probePivot.add(probeArm, probeWheel, probePin);
+    robot.add(forkR, forkF, probePivot);
+
+    const frontTel = makeTelescope(Z_FRONT, false);
+    frontTel.root.position.set(MOUTH - STAGE_LEN, RAIL_Y, Z_FRONT);
+    const rearTel = makeTelescope(Z_REAR, true);
+    rearTel.root.position.set(-MOUTH + STAGE_LEN, RAIL_Y, Z_REAR);
+    rearTel.root.rotation.y = Math.PI;
+    robot.add(frontTel.root, rearTel.root);
+
+    const cmBall = new THREE.Mesh(new THREE.SphereGeometry(0.026, 20, 14), paint(0xe07030, 0.35, 0.4));
+    const linePos = new Float32Array(6);
+    const lineGeom = new THREE.BufferGeometry();
+    lineGeom.setAttribute("position", new THREE.BufferAttribute(linePos, 3));
+    const cmLine = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({ color: 0xe07030 }));
+    scene.add(cmBall, cmLine);
+    scene.traverse((o) => {
+      o.frustumCulled = false;
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+
+    const showWheel = makeFork();
+    showWheel.position.set(-1.3, 0.1, 0);
+    const showBat = new THREE.Group();
+    showBat.add(battery.clone(), nose.clone());
+    showBat.position.set(-0.2, 0.15, 0);
+    const showGrip = new THREE.Group();
+    showGrip.add(frontTel.grip.clone());
+    showGrip.position.set(0.8, 0.2, 0);
+    const showTower = tower.clone();
+    showTower.position.set(2.1, -0.3, 0);
+    showTower.scale.setScalar(0.7);
+    catalog.add(showWheel, showBat, showGrip, showTower);
+
+    function phaseTitle(u) {
+      if (u < 6) return "Едет по прямому проводу";
+      if (u < 13) return "Трубы выезжают из жёлоба";
+      if (u < 16) return "Захваты садятся на провод";
+      if (u < 19) return "Вилки снимают колёса";
+      if (u < 27) return "Проезжает провис на роликах";
+      if (u < 30) return "Колёса возвращаются на прямой провод";
+      if (u < 33) return "Захваты поднимаются";
+      if (u < 37) return "Трубы задвигаются обратно";
+      return "Едет по прямому проводу";
+    }
+    function phaseCause(u) {
+      if (u < 6) return "Заход по прямому проводу. Колёса в канавке. Впереди два изолятора в метре друг от друга, между ними провис полметра.";
+      if (u < 19) return "Телескопические ролики выезжают и садятся на прямой провод по обе стороны от провиса. Колёса снимаются с жилы.";
+      if (u < 30) return "Корпус проезжает изоляторы на роликах и не опускается в провис. Провис идёт между балками рамы, над батареей. Колёса в это время сняты с жилы.";
+      return "Тележка снова на прямом проводе за вторым изолятором. Провис пройден на роликах.";
+    }
+
+    const downAxis = new THREE.Vector3(0, -1, 0);
+    const flipY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+    function aimGrip(tel, dir, flipped) {
+      const worldQ = new THREE.Quaternion().setFromUnitVectors(downAxis, new THREE.Vector3(dir.x, dir.y, dir.z));
+      tel.grip.quaternion.copy(flipped ? flipY.clone().invert().multiply(worldQ) : worldQ);
+      tel.foot.quaternion.copy(tel.grip.quaternion).invert();
+    }
+    function seatFoot(tel, oy, oz, flipped) {
+      const base = tel.foot.userData.base;
+      const v = new THREE.Vector3(0, oy, flipped ? -oz : oz);
+      v.applyQuaternion(tel.grip.quaternion.clone().invert());
+      tel.foot.position.set(base.x + v.x, base.y + v.y, base.z + v.z);
+    }
+
+    let spin = 0;
+    let prevBase = START;
+    function applyPose(L) {
+      const p = L.p;
+      robot.position.set(p.base, 0, 0);
+      robot.rotation.z = 0;
+      robot.updateMatrixWorld(true);
+      const spoolWorld = new THREE.Vector3(-0.18, -0.68, 0.30);
+      robot.localToWorld(spoolWorld);
+      const fiberPos = fiberGeom.attributes.position;
+      for (let i = 0; i < 24; i += 1) {
+        const t = i / 23;
+        const x = spoolWorld.x + ( -7 - spoolWorld.x) * t;
+        const y = spoolWorld.y + (-1.15 - spoolWorld.y) * t * t;
+        const z = spoolWorld.z + (0.55 - spoolWorld.z) * t;
+        fiberPos.setXYZ(i, x, y, z);
+      }
+      fiberPos.needsUpdate = true;
+      const d = p.base - prevBase;
+      if (p.wheelDown > 0.5) spin += d / GROOVE_R;
+      prevBase = p.base;
+      forkR.rotation.x = -L.wheelTheta;
+      forkF.rotation.x = L.wheelTheta;
+      probePivot.rotation.x = L.wheelTheta;
+      forkR.getObjectByName("wheel").rotation.set(L.wheelTheta, 0, -spin);
+      forkF.getObjectByName("wheel").rotation.set(-L.wheelTheta, 0, spin);
+      forkR.getObjectByName("driveMotor").rotation.y = spin * 6;
+      forkF.getObjectByName("driveMotor").rotation.y = spin * 6;
+      probeWheel.rotation.set(-L.wheelTheta, 0, spin * 2);
+      const fExt = extensions(p.frontExt);
+      const rExt = extensions(p.rearExt);
+      fExt.forEach((ext, i) => { frontTel.stages[i].position.x = ext; });
+      rExt.forEach((ext, i) => { rearTel.stages[i].position.x = ext; });
+      aimGrip(frontTel, L.gf.dir, false);
+      aimGrip(rearTel, L.gr.dir, true);
+      const shift = wireShift(p.u);
+      const follow = p.down;
+      seatFoot(frontTel, shift.y * follow, shift.z * follow, false);
+      seatFoot(rearTel, shift.y * follow, shift.z * follow, true);
+      frontTel.screw.rotation.y = fExt[0] * 80;
+      rearTel.screw.rotation.y = rExt[0] * 80;
+
+      const cm = L.cm;
+      cmBall.position.set(cm.x, cm.y, cm.z);
+      linePos[0] = p.base; linePos[1] = 0; linePos[2] = 0;
+      linePos[3] = cm.x; linePos[4] = cm.y; linePos[5] = cm.z;
+      lineGeom.attributes.position.needsUpdate = true;
+
+      const left = Math.min.apply(null, L.contacts);
+      const right = Math.max.apply(null, L.contacts);
+      const span = Math.max(0.05, right - left);
+      const weight = TOTAL * G;
+      const rLeft = weight * (right - cm.x) / span;
+      const rRight = weight * (cm.x - left) / span;
+      const side = weight * cm.z;
+      const along = weight * Math.sin(15 * Math.PI / 180);
+      const torque = along * GROOVE_R * 10.197;
+      titleEl.textContent = phaseTitle(p.u);
+      causeEl.textContent = phaseCause(p.u);
+      const shiftNow = wireShift(p.u);
+      const wind = 0.5 * 1.225 * 1.1 * 0.10 * 100;
+      const swing = Math.atan2(wind, weight) * 180 / Math.PI;
+      const restore = weight * Math.abs(cm.y);
+      numsEl.textContent = "Масса " + TOTAL.toFixed(2).replace(".", ",") + " кг. Центр ниже провода на " + Math.abs(cm.y * 100).toFixed(1).replace(".", ",") + " см, вбок " + (cm.z * 100).toFixed(1).replace(".", ",") + " см. "
+        + "Боковой момент " + side.toFixed(2).replace(".", ",") + " Н·м. Возврат маятника " + restore.toFixed(1).replace(".", ",") + " Н·м на радиан. "
+        + "Ветер 10 м/с: " + wind.toFixed(1).replace(".", ",") + " Н, корпус отклоняется на " + swing.toFixed(0) + "° и сам возвращается. "
+        + "Реакции " + rLeft.toFixed(1).replace(".", ",") + " и " + rRight.toFixed(1).replace(".", ",") + " Н. "
+        + "Момент на колесе при 15°: " + torque.toFixed(2).replace(".", ",") + " кгс·см. Каждый тормоз 5 кгс·см, один держит уклон целиком. "
+        + "Провод под захватом " + (shiftNow.y * 1000).toFixed(0) + " мм по высоте и " + (shiftNow.z * 1000).toFixed(0) + " мм вбок, окно ±25 мм. "
+        + "На пролёте 250 м при стреле около 6 м наклон у опоры около 5°. Под тележкой перепад меньше 2 мм. Между контактами 0,44 м при токе 200 А и погонном сопротивлении порядка 0,1 Ом/км падение около 9 мВ.";
+    }
+
+    let mode = "wire";
+    let playing = true;
+    let seconds = 0;
+    const startAt = parseFloat(new URLSearchParams(location.search).get("t") || "");
+    if (!Number.isNaN(startAt)) {
+      seconds = startAt;
+      playing = false;
+      document.getElementById("play").textContent = "Пуск";
+      document.getElementById("play").classList.remove("on");
+    }
+    let last = performance.now();
+    let pointer = null;
+    const orbit = { theta: 1.05, phi: 1.12, radius: 4.8 };
+    canvas.addEventListener("pointerdown", (e) => {
+      pointer = { x: e.clientX, y: e.clientY, t: orbit.theta, p: orbit.phi };
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!pointer) return;
+      orbit.theta = pointer.t - (e.clientX - pointer.x) * 0.007;
+      orbit.phi = Math.min(1.48, Math.max(0.35, pointer.p + (e.clientY - pointer.y) * 0.005));
+    });
+    canvas.addEventListener("pointerup", () => { pointer = null; });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      orbit.radius = Math.min(10, Math.max(1.8, orbit.radius + e.deltaY * 0.003));
+    }, { passive: false });
+    document.getElementById("play").onclick = () => {
+      playing = !playing;
+      const b = document.getElementById("play");
+      b.textContent = playing ? "Пауза" : "Пуск";
+      b.classList.toggle("on", playing);
+    };
+    document.getElementById("onwire").onclick = () => {
+      mode = "wire";
+      world.visible = true;
+      catalog.visible = false;
+      cmBall.visible = true;
+      cmLine.visible = true;
+      document.getElementById("onwire").classList.add("on");
+      document.getElementById("parts").classList.remove("on");
+    };
+    document.getElementById("parts").onclick = () => {
+      mode = "parts";
+      world.visible = false;
+      catalog.visible = true;
+      cmBall.visible = false;
+      cmLine.visible = false;
+      document.getElementById("parts").classList.add("on");
+      document.getElementById("onwire").classList.remove("on");
+      titleEl.textContent = "Детали";
+      causeEl.textContent = "Вилка с колесом, батарея с датчиками, захват на конце трубы, гирлянда на траверсе. На проводе стоят те же узлы.";
+      numsEl.textContent = "Масса " + TOTAL.toFixed(2).replace(".", ",") + " кг. Рама и батарея "
+        + (MASS.frame + MASS.bat + MASS.sens).toFixed(2).replace(".", ",")
+        + " кг, колёса с вилками " + (2 * (MASS.wheel + MASS.fork)).toFixed(2).replace(".", ",")
+        + " кг, жёлоба и трубы " + (2 * MASS.channel + 2 * NSTAGES * MASS.stage).toFixed(2).replace(".", ",")
+        + " кг, захваты " + (2 * MASS.grip).toFixed(2).replace(".", ",") + " кг.";
+    };
+
+    const CONTACT = { wheel: 1, keeper: 1, gripFoot: 1, gripArm: 1, senseTip: 1, probe: 1 };
+    function contactName(mesh) {
+      let o = mesh;
+      while (o) {
+        if (CONTACT[o.name]) return o.name;
+        o = o.parent;
+      }
+      return "";
+    }
+    function pointInside(mesh, point) {
+      const g = mesh.geometry;
+      if (!g) return false;
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      const center = g.boundingSphere.center.clone().applyMatrix4(mesh.matrixWorld);
+      const reach = g.boundingSphere.radius * mesh.matrixWorld.getMaxScaleOnAxis() + 0.03;
+      if (center.distanceTo(point) > reach) return false;
+      const local = mesh.worldToLocal(point.clone());
+      const p = g.parameters || {};
+      if (g.type === "CylinderGeometry") {
+        return Math.hypot(local.x, local.z) <= Math.max(p.radiusTop || 0, p.radiusBottom || 0) && Math.abs(local.y) <= (p.height || 0) / 2;
+      }
+      if (g.type === "SphereGeometry") return local.length() <= (p.radius || 0);
+      if (!g.boundingBox) g.computeBoundingBox();
+      const b = g.boundingBox;
+      return local.x >= b.min.x && local.x <= b.max.x && local.y >= b.min.y && local.y <= b.max.y && local.z >= b.min.z && local.z <= b.max.z;
+    }
+    if (new URLSearchParams(location.search).get("check") === "1") {
+      const meshes = [];
+      robot.traverse((o) => { if (o.isMesh) meshes.push(o); });
+      const wirePts = [];
+      for (let x = -2.2; x <= 2.3; x += 0.04) {
+        const y = wireY(x);
+        wirePts.push(new THREE.Vector3(x, y, 0));
+        wirePts.push(new THREE.Vector3(x, y + 0.008, 0));
+        wirePts.push(new THREE.Vector3(x, y, 0.008));
+        wirePts.push(new THREE.Vector3(x, y, -0.008));
+      }
+      const isoPts = [];
+      for (const tx of [TOWER_X, TOWER_X + SPAN_L]) {
+        for (let n = 0; n < 8; n += 1) {
+          const y = 0.32 + n * 0.055;
+          for (const r of [0.04, 0.09]) {
+            isoPts.push(new THREE.Vector3(tx + r, y, 0), new THREE.Vector3(tx - r, y, 0), new THREE.Vector3(tx, y, r), new THREE.Vector3(tx, y, -r));
+          }
+        }
+        for (const y of [0.02, 0.05, 0.12, 0.4]) {
+          isoPts.push(new THREE.Vector3(tx, y, 0), new THREE.Vector3(tx + 0.04, y, 0.01), new THREE.Vector3(tx - 0.04, y, -0.01));
+        }
+      }
+      const hits = new Map();
+      let zMin = 99;
+      let zMax = -99;
+      for (let t = 0; t < 40; t += 0.5) {
+        const L = layout(t);
+        applyPose(L);
+        zMin = Math.min(zMin, L.cm.z);
+        zMax = Math.max(zMax, L.cm.z);
+        const onSag = (x) => x > 0.03 && x < SPAN_L - 0.03;
+        meshes.forEach((mesh) => {
+          const who = contactName(mesh);
+          wirePts.forEach((pt) => {
+            if (!pointInside(mesh, pt)) return;
+            if (who && !onSag(pt.x)) return;
+            const key = (who || "body") + " wire x=" + pt.x.toFixed(2);
+            hits.set(key, (hits.get(key) || 0) + 1);
+          });
+          if (who === "wheel" || who === "keeper" || who === "probe" || who === "gripFoot" || who === "gripArm") {
+            isoPts.forEach((pt) => {
+              if (!pointInside(mesh, pt)) return;
+              const key = who + " insulator";
+              hits.set(key, (hits.get(key) || 0) + 1);
+            });
+          } else {
+            isoPts.forEach((pt) => {
+              if (!pointInside(mesh, pt)) return;
+              const key = "body insulator y=" + pt.y.toFixed(2);
+              hits.set(key, (hits.get(key) || 0) + 1);
+            });
+          }
+        });
+      }
+      const lines = ["zCM " + (zMin * 100).toFixed(1) + ".." + (zMax * 100).toFixed(1) + " cm"];
+      hits.forEach((n, k) => lines.push(n + " " + k));
+      const report = lines.length === 1 ? lines[0] + " CLEAR" : lines.slice(0, 18).join(" | ");
+      document.title = report;
+      causeEl.textContent = report;
+    }
+
+    function draw(now) {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (playing && mode === "wire") seconds = (seconds + dt) % 40;
+      const bx = motion(seconds).base;
+      const onWire = poseOnWire(bx);
+      const focus = mode === "wire" ? new THREE.Vector3(bx, -0.12, 0.05) : new THREE.Vector3(0.4, 0.05, 0);
+      if (mode === "wire") applyPose(layout(seconds));
+      else catalog.rotation.y += dt * 0.25;
+      const radius = mode === "wire" ? orbit.radius : 4.8;
+      camera.position.set(
+        focus.x + radius * Math.sin(orbit.phi) * Math.sin(orbit.theta),
+        focus.y + radius * Math.cos(orbit.phi),
+        focus.z + radius * Math.sin(orbit.phi) * Math.cos(orbit.theta)
+      );
+      sun.position.set(focus.x + 4.2, focus.y + 7.5, focus.z + 5.2);
+      sun.target.position.copy(focus);
+      camera.lookAt(focus);
+      const w = canvas.clientWidth || 900;
+      const h = canvas.clientHeight || 560;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / Math.max(1, h);
+      camera.updateProjectionMatrix();
+      renderer.render(scene, camera);
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>
